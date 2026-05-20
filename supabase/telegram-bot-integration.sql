@@ -5,7 +5,7 @@
 create table if not exists gunakul.telegram_accounts (
   id                 uuid        primary key default gen_random_uuid(),
   acharya_id         uuid        references gunakul.mst_acharyas(id) on delete cascade,
-  user_id            uuid        references gunakul.mst_users(id) on delete cascade,
+  user_id            uuid        references gunakul.mst_users(id) on delete set null,
   phone              text,
   telegram_user_id   bigint      not null,
   telegram_chat_id   bigint      not null,
@@ -20,14 +20,12 @@ create table if not exists gunakul.telegram_accounts (
   unique (telegram_user_id, acharya_id)
 );
 
--- Indexes for frequent lookups
 create index if not exists idx_telegram_accounts_user_id
   on gunakul.telegram_accounts(user_id);
 
 create index if not exists idx_telegram_accounts_acharya_id
   on gunakul.telegram_accounts(acharya_id);
 
--- updated_at trigger
 create or replace function gunakul.set_telegram_accounts_updated_at()
 returns trigger language plpgsql as $$
 begin
@@ -41,66 +39,80 @@ create trigger trg_telegram_accounts_updated_at
   before update on gunakul.telegram_accounts
   for each row execute function gunakul.set_telegram_accounts_updated_at();
 
--- Log tables for the bot (in gunakul schema so they aggregate across acharyas)
-
+-- ---------------------------------------------------------------------------
+-- Chat log — user_message / ai_response column names match the TypeScript code
+-- ---------------------------------------------------------------------------
 create table if not exists gunakul.log_chat (
-  id           uuid        primary key default gen_random_uuid(),
-  acharya_id   uuid        references gunakul.mst_acharyas(id) on delete set null,
-  user_id      uuid        references gunakul.mst_users(id) on delete set null,
-  module_id    text,
-  lang         text,
-  user_msg     text,
-  bot_reply    text,
-  created_at   timestamptz not null default now()
+  id               uuid        primary key default gen_random_uuid(),
+  acharya_id       uuid        references gunakul.mst_acharyas(id) on delete set null,
+  user_id          uuid        references gunakul.mst_users(id) on delete set null,
+  module_id        text,
+  lang             text,
+  user_message     text,
+  ai_response      text,
+  response_time_ms integer,
+  created_at       timestamptz not null default now()
 );
 
 create index if not exists idx_log_chat_user_id    on gunakul.log_chat(user_id);
 create index if not exists idx_log_chat_acharya_id on gunakul.log_chat(acharya_id);
 create index if not exists idx_log_chat_created_at on gunakul.log_chat(created_at desc);
 
+-- ---------------------------------------------------------------------------
+-- Quiz log — includes jsonb questions array
+-- ---------------------------------------------------------------------------
 create table if not exists gunakul.log_quiz (
   id           uuid        primary key default gen_random_uuid(),
   acharya_id   uuid        references gunakul.mst_acharyas(id) on delete set null,
   user_id      uuid        references gunakul.mst_users(id) on delete set null,
   module_id    text,
-  lang         text,
   score        integer,
   total        integer,
+  questions    jsonb,
   created_at   timestamptz not null default now()
 );
 
 create index if not exists idx_log_quiz_user_id    on gunakul.log_quiz(user_id);
 create index if not exists idx_log_quiz_acharya_id on gunakul.log_quiz(acharya_id);
 
+-- ---------------------------------------------------------------------------
+-- Apply / field-report log — log_type + data jsonb match TypeScript code
+-- ---------------------------------------------------------------------------
 create table if not exists gunakul.log_apply (
   id           uuid        primary key default gen_random_uuid(),
   acharya_id   uuid        references gunakul.mst_acharyas(id) on delete set null,
   user_id      uuid        references gunakul.mst_users(id) on delete set null,
   module_id    text,
-  lang         text,
-  score        integer,
-  has_photo    boolean     not null default false,
-  feedback     text,
+  log_type     text        not null default 'self_assessment',
+  data         jsonb,
   created_at   timestamptz not null default now()
 );
 
 create index if not exists idx_log_apply_user_id    on gunakul.log_apply(user_id);
 create index if not exists idx_log_apply_acharya_id on gunakul.log_apply(acharya_id);
 
+-- ---------------------------------------------------------------------------
+-- Progress log — upserted per (user_id, acharya_id, module_id)
+-- ---------------------------------------------------------------------------
 create table if not exists gunakul.log_progress (
-  id           uuid        primary key default gen_random_uuid(),
-  acharya_id   uuid        references gunakul.mst_acharyas(id) on delete set null,
-  user_id      uuid        references gunakul.mst_users(id) on delete set null,
-  module_id    text,
-  section_id   uuid,
-  event        text,
-  created_at   timestamptz not null default now()
+  id                   uuid        primary key default gen_random_uuid(),
+  acharya_id           uuid        references gunakul.mst_acharyas(id) on delete set null,
+  user_id              uuid        references gunakul.mst_users(id) on delete set null,
+  module_id            text,
+  sections_completed   text[]      not null default '{}',
+  completed            boolean     not null default false,
+  completed_at         timestamptz,
+  updated_on           timestamptz not null default now(),
+  created_at           timestamptz not null default now(),
+  unique (user_id, acharya_id, module_id)
 );
 
 create index if not exists idx_log_progress_user_id    on gunakul.log_progress(user_id);
 create index if not exists idx_log_progress_acharya_id on gunakul.log_progress(acharya_id);
 
+-- ---------------------------------------------------------------------------
 -- AI usage log (mirrors what ai-logger.ts writes)
+-- ---------------------------------------------------------------------------
 create table if not exists gunakul.log_ai_usage (
   id                  uuid        primary key default gen_random_uuid(),
   ts                  timestamptz not null,
@@ -122,3 +134,17 @@ create table if not exists gunakul.log_ai_usage (
 
 create index if not exists idx_log_ai_usage_acharya_id on gunakul.log_ai_usage(acharya_id);
 create index if not exists idx_log_ai_usage_ts         on gunakul.log_ai_usage(ts desc);
+
+-- ---------------------------------------------------------------------------
+-- Videos table (in acharya-specific schema, e.g. acharya_cowherd)
+-- Create this in the correct schema via Supabase dashboard or a separate migration
+-- ---------------------------------------------------------------------------
+-- create table if not exists acharya_cowherd.crs_videos (
+--   id           uuid        primary key default gen_random_uuid(),
+--   title        text        not null,
+--   url          text        not null,
+--   description  text,
+--   sort_order   integer     not null default 0,
+--   is_deleted   boolean     not null default false,
+--   created_at   timestamptz not null default now()
+-- );

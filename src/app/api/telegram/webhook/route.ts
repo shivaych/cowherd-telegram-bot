@@ -121,6 +121,13 @@ interface TelegramAccount {
   state: Record<string, unknown>;
 }
 
+interface VideoRow {
+  id: string;
+  youtube_id: string;
+  title: string;
+  sort_order: number;
+}
+
 interface ModuleRow {
   id: string;       // UUID
   slug: string;
@@ -242,10 +249,8 @@ async function handleMessage(message: TelegramMessage, acharyaId: string) {
   if (text === "/progress" || isCmd(text, "progress")) { await sendProgress(chatId, account, acharyaId); return; }
   if (text === "/lang" || isCmd(text, "language")) { await sendLanguagePicker(chatId); return; }
 
-  if (isCmd(text, "videos")) {
-    await sendMessage(chatId,
-      "KarmYog Vatika Orientation Videos are in the Video tab of the Cowherd Acharya app. You can also visit the web app to watch them.",
-      persistentMainMenu(account.preferred_lang));
+  if (isCmd(text, "videos") || text === "/videos") {
+    await sendVideos(chatId, account.preferred_lang);
     return;
   }
 
@@ -873,6 +878,66 @@ async function setAccountMode(accountId: string, mode: "ask" | "apply") {
   await dbGunakul.from("telegram_accounts")
     .update({ mode, state: {}, updated_at: new Date().toISOString() })
     .eq("id", accountId);
+}
+
+// ---------------------------------------------------------------------------
+// Videos
+// ---------------------------------------------------------------------------
+async function getVideos(lang: Lang): Promise<VideoRow[]> {
+  try {
+    const { data, error } = await dbAcharya
+      .from("crs_videos")
+      .select("id, youtube_id, sort_order, crs_video_tr(lang, title)")
+      .eq("is_deleted", false)
+      .order("sort_order");
+    if (error) {
+      console.error("[telegram] getVideos error:", error);
+      return [];
+    }
+    // Deduplicate by youtube_id (DB has duplicate rows from multiple seed runs)
+    const seen = new Set<string>();
+    return (data || [])
+      .filter((v: Record<string, unknown>) => {
+        const trs = (v.crs_video_tr || []) as Array<{ lang: string; title: string }>;
+        const key = String(v.youtube_id || "");
+        if (!key || seen.has(key) || trs.length === 0) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((v: Record<string, unknown>) => {
+        const trs = (v.crs_video_tr || []) as Array<{ lang: string; title: string }>;
+        const picked = trs.find((t) => t.lang === lang) || trs.find((t) => t.lang === "en") || trs[0];
+        return {
+          id: String(v.id),
+          youtube_id: String(v.youtube_id),
+          title: picked?.title || "",
+          sort_order: Number(v.sort_order || 0),
+        };
+      });
+  } catch (err) {
+    console.error("[telegram] getVideos threw:", err);
+    return [];
+  }
+}
+
+async function sendVideos(chatId: number, lang: Lang) {
+  const videos = await getVideos(lang);
+  if (videos.length === 0) {
+    const msg =
+      lang === "hi" ? "अभी कोई वीडियो उपलब्ध नहीं है।"
+      : lang === "bn" ? "এখনও কোন ভিডিও পাওয়া যায়নি।"
+      : "No videos available yet.";
+    await sendMessage(chatId, msg, persistentMainMenu(lang));
+    return;
+  }
+  const header =
+    lang === "hi" ? "KarmYog Vatika Orientation Videos:"
+    : lang === "bn" ? "KarmYog Vatika ওরিয়েন্টেশন ভিডিও:"
+    : "KarmYog Vatika Orientation Videos:";
+  const lines = videos.map((v, i) =>
+    `${i + 1}. ${v.title}\nhttps://www.youtube.com/watch?v=${v.youtube_id}`
+  );
+  await sendMessage(chatId, `${header}\n\n${lines.join("\n\n")}`, persistentMainMenu(lang));
 }
 
 // ---------------------------------------------------------------------------
