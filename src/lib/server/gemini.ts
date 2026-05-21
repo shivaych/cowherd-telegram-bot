@@ -17,6 +17,7 @@ export interface QuizQuestion {
 }
 
 export interface ApplyEvaluation {
+  relevant: boolean;
   score: number;
   feedback: string;
   nextStep: string;
@@ -183,16 +184,22 @@ export async function evaluateApply(opts: {
   hasPhoto?: boolean;
   image?: string | null;
 }): Promise<ApplyEvaluation> {
-  const prompt = `FIELD APPLICATION EVALUATION.
+  const prompt = `FIELD APPLICATION EVALUATION for cattle and horse care training.
 
-The learner has reported field work for module ${opts.moduleId} (cattle and horse care).
-Report:
+The learner has reported field work for module ${opts.moduleId}.
+Report text:
 ${opts.text || "(no text provided)"}
 
 Photo attached: ${opts.hasPhoto ? "yes" : "no"}.
 
-Respond ONLY in valid JSON:
-{"score":7,"feedback":"short practical feedback in plain text","nextStep":"one concrete next step"}
+${opts.hasPhoto
+  ? `RELEVANCE CHECK FIRST: Inspect the attached photo. It is relevant ONLY if it clearly shows cattle, buffalo, horses, calves, their stable/shed, fodder, milking, vaccination, grooming, hoof care, dung/manure handling, pasture, or the learner doing animal-care work. It is NOT relevant if the photo is a screenshot, app/website UI, random object, food unrelated to livestock, scenery without animals, a meme, a document, or a person not actively doing animal care.
+- If NOT relevant: set "relevant" to false, "score" to 0, and write "feedback" politely telling the learner the photo does not show cattle/horse field work and asking them to send a photo of the animals or the task they performed. "nextStep" should ask them to share a relevant photo.
+- If relevant: set "relevant" to true and evaluate normally.`
+  : `Set "relevant" to true (text-only field report).`}
+
+Respond ONLY in valid JSON in this exact shape:
+{"relevant":true,"score":7,"feedback":"short practical feedback in plain text","nextStep":"one concrete next step"}
 
 Score must be 0 to 10. Respond in ${langName(opts.lang)}.`;
 
@@ -200,13 +207,16 @@ Score must be 0 to 10. Respond in ${langName(opts.lang)}.`;
 
   try {
     const parsed = extractJson(reply) as Partial<ApplyEvaluation>;
+    const relevant = parsed.relevant !== false;
     return {
-      score: Math.max(0, Math.min(10, Number(parsed.score || 0))),
+      relevant,
+      score: relevant ? Math.max(0, Math.min(10, Number(parsed.score || 0))) : 0,
       feedback: String(parsed.feedback || reply).slice(0, 4000),
       nextStep: String(parsed.nextStep || "Continue practising and observe the animals carefully.").slice(0, 1000),
     };
   } catch {
     return {
+      relevant: true,
       score: 7,
       feedback: reply.slice(0, 4000),
       nextStep: "Continue practising and observe the animals carefully.",

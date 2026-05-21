@@ -221,6 +221,10 @@ async function handleMessage(message: TelegramMessage, acharyaId: string) {
   if (!account.user_id) {
     const typedPhone = normalizeIndianPhone(text);
     if (typedPhone) { await linkPhone(account, chatId, typedPhone, acharyaId); return; }
+    if (!account.state.lang_selected) {
+      await sendInitialLanguagePicker(chatId);
+      return;
+    }
     await requestPhone(chatId, account.preferred_lang);
     return;
   }
@@ -301,7 +305,12 @@ async function handleCallback(query: TelegramCallbackQuery, acharyaId: string) {
   if (data.startsWith("lang:")) {
     const lang = data.slice(5) as Lang;
     if (!["bn", "hi", "en"].includes(lang)) return;
-    await dbGunakul.from("telegram_accounts").update({ preferred_lang: lang, updated_at: new Date().toISOString() }).eq("id", account.id);
+    const nextState = { ...account.state, lang_selected: true };
+    await dbGunakul.from("telegram_accounts").update({
+      preferred_lang: lang,
+      state: nextState,
+      updated_at: new Date().toISOString(),
+    }).eq("id", account.id);
     if (account.user_id) {
       await dbGunakul.from("mst_users").update({ preferred_lang: lang }).eq("id", account.user_id).then(() => {});
       await sendHome(chatId, { ...account, preferred_lang: lang }, acharyaId);
@@ -512,6 +521,20 @@ async function sendLanguagePicker(chatId: number) {
       { text: "Bengali", callback_data: "confirm_lang:bn" },
     ]],
   });
+}
+
+async function sendInitialLanguagePicker(chatId: number) {
+  await sendMessage(
+    chatId,
+    "Welcome to Cowherd Acharya.\nस्वागत है। কৃপया আপনার ভাষা বেছে নিন।\n\nPlease choose your language / भाषा चुनें / ভাষা বেছে নিন",
+    {
+      inline_keyboard: [[
+        { text: "English", callback_data: "lang:en" },
+        { text: "हिंदी", callback_data: "lang:hi" },
+        { text: "বাংলা", callback_data: "lang:bn" },
+      ]],
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -744,15 +767,20 @@ async function handleApplyMessage(chatId: number, account: TelegramAccount, mess
     user_id: account.user_id,
     acharya_id: acharyaId,
     module_id: moduleUuid,
-    log_type: "self_assessment",
+    log_type: evaluation.relevant ? "self_assessment" : "irrelevant_submission",
     data: {
       input: text || (photo ? "[photo submitted]" : "[voice submitted]"),
-      score: evaluation.score,
+      relevant: evaluation.relevant,
+      score: evaluation.relevant ? evaluation.score : null,
       feedback: evaluation.feedback,
-      nextStep: evaluation.nextStep,
+      nextStep: evaluation.relevant ? evaluation.nextStep : null,
       hasPhoto: !!photo,
     },
   });
+  if (!evaluation.relevant) {
+    await sendMessage(chatId, evaluation.feedback, persistentMainMenu(account.preferred_lang));
+    return;
+  }
   await sendMessage(
     chatId,
     `Score: ${evaluation.score}/10\n\n${evaluation.feedback}\n\nNext: ${evaluation.nextStep}`,
