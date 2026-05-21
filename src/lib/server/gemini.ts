@@ -177,6 +177,26 @@ export function fallbackQuizQuestions(moduleId: string, lang: string): QuizQuest
   ];
 }
 
+async function describeImage(image: string): Promise<string> {
+  const part = mediaPart(image);
+  if (!part) return "";
+  try {
+    const json = await generateContent({
+      contents: [{
+        role: "user",
+        parts: [
+          part,
+          { text: "Describe in one short sentence exactly what is visible in this photo. List the main subject (person, object, animal, scenery, screenshot, document, UI, food, etc). Do not guess context, do not assume anything not visible. Plain text only." },
+        ],
+      }],
+      generationConfig: { temperature: 0, maxOutputTokens: 120 },
+    });
+    return textFromGemini(json);
+  } catch {
+    return "";
+  }
+}
+
 export async function evaluateApply(opts: {
   text: string;
   moduleId: string;
@@ -184,33 +204,60 @@ export async function evaluateApply(opts: {
   hasPhoto?: boolean;
   image?: string | null;
 }): Promise<ApplyEvaluation> {
-  const prompt = `FIELD APPLICATION EVALUATION for cattle and horse care training.
+  const started = Date.now();
 
-The learner has reported field work for module ${opts.moduleId}.
-Report text:
+  let imageDescription = "";
+  let imageRelevant = true;
+  if (opts.hasPhoto && opts.image) {
+    imageDescription = await describeImage(opts.image);
+    imageRelevant = isLivestockRelevant(imageDescription);
+  }
+
+  if (opts.hasPhoto && !imageRelevant) {
+    const feedback = irrelevantFeedback(opts.lang, imageDescription);
+    const nextStep = irrelevantNextStep(opts.lang);
+    logChatCall({ model: MODEL, status: "ok", durationMs: Date.now() - started, lang: opts.lang, moduleId: opts.moduleId, hasImage: true });
+    return { relevant: false, score: 0, feedback, nextStep };
+  }
+
+  const evalPrompt = `You are evaluating a learner's field-work report for cattle and horse care training (module ${opts.moduleId}).
+
+Learner's text report:
 ${opts.text || "(no text provided)"}
 
-Photo attached: ${opts.hasPhoto ? "yes" : "no"}.
+${opts.hasPhoto ? `Photo description (from a separate vision check): ${imageDescription || "unavailable"}\nThe photo has been confirmed to show livestock-related field work.` : "No photo attached."}
 
-${opts.hasPhoto
-  ? `RELEVANCE CHECK FIRST: Inspect the attached photo. It is relevant ONLY if it clearly shows cattle, buffalo, horses, calves, their stable/shed, fodder, milking, vaccination, grooming, hoof care, dung/manure handling, pasture, or the learner doing animal-care work. It is NOT relevant if the photo is a screenshot, app/website UI, random object, food unrelated to livestock, scenery without animals, a meme, a document, or a person not actively doing animal care.
-- If NOT relevant: set "relevant" to false, "score" to 0, and write "feedback" politely telling the learner the photo does not show cattle/horse field work and asking them to send a photo of the animals or the task they performed. "nextStep" should ask them to share a relevant photo.
-- If relevant: set "relevant" to true and evaluate normally.`
-  : `Set "relevant" to true (text-only field report).`}
+Give a short, practical evaluation. Score from 0 to 10 based on the field work described. Be encouraging but specific. Respond ONLY in valid JSON:
+{"score":7,"feedback":"short practical feedback in plain text","nextStep":"one concrete next step"}
 
-Respond ONLY in valid JSON in this exact shape:
-{"relevant":true,"score":7,"feedback":"short practical feedback in plain text","nextStep":"one concrete next step"}
+Respond in ${langName(opts.lang)}. Plain text inside JSON values, no markdown.`;
 
-Score must be 0 to 10. Respond in ${langName(opts.lang)}.`;
+  const parts: Array<{ text: string } | NonNullable<ReturnType<typeof mediaPart>>> = [];
+  if (opts.hasPhoto && opts.image) {
+    const p = mediaPart(opts.image);
+    if (p) parts.push(p);
+  }
+  parts.push({ text: evalPrompt });
 
-  const reply = await generateChatReply({ message: prompt, moduleId: opts.moduleId, lang: opts.lang, image: opts.image || null });
+  let reply = "";
+  try {
+    const json = await generateContent({
+      contents: [{ role: "user", parts }],
+      generationConfig: { temperature: 0.3, maxOutputTokens: 700, responseMimeType: "application/json" },
+    });
+    reply = textFromGemini(json);
+    logChatCall({ model: MODEL, status: "ok", durationMs: Date.now() - started, lang: opts.lang, moduleId: opts.moduleId, hasImage: !!opts.image });
+  } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    logChatCall({ model: MODEL, status: "error", durationMs: Date.now() - started, lang: opts.lang, moduleId: opts.moduleId, hasImage: !!opts.image, errorMessage });
+    throw err;
+  }
 
   try {
     const parsed = extractJson(reply) as Partial<ApplyEvaluation>;
-    const relevant = parsed.relevant !== false;
     return {
-      relevant,
-      score: relevant ? Math.max(0, Math.min(10, Number(parsed.score || 0))) : 0,
+      relevant: true,
+      score: Math.max(0, Math.min(10, Number(parsed.score || 0))),
       feedback: String(parsed.feedback || reply).slice(0, 4000),
       nextStep: String(parsed.nextStep || "Continue practising and observe the animals carefully.").slice(0, 1000),
     };
@@ -222,4 +269,36 @@ Score must be 0 to 10. Respond in ${langName(opts.lang)}.`;
       nextStep: "Continue practising and observe the animals carefully.",
     };
   }
+}
+
+function isLivestockRelevant(description: string): boolean {
+  if (!description) return false;
+  const d = description.toLowerCase();
+  const positive = [
+    "cow", "cattle", "bull", "ox", "oxen", "calf", "calves", "buffalo", "buffaloes",
+    "horse", "horses", "pony", "ponies", "foal", "mare", "stallion",
+    "stable", "stall", "barn", "shed", "cowshed", "byre", "paddock", "pasture",
+    "udder", "milking", "milk pail", "fodder", "hay", "straw", "manger",
+    "hoof", "hooves", "saddle", "bridle", "halter", "harness",
+    "goat", "sheep", "livestock",
+  ];
+  for (const kw of positive) if (d.includes(kw)) return true;
+  return false;
+}
+
+function irrelevantFeedback(lang: string, description: string): string {
+  const seen = description ? ` (I see: ${description.replace(/\s+/g, " ").trim().slice(0, 160)})` : "";
+  if (lang === "hi") {
+    return `भाई, यह फोटो गाय या घोड़े की देखभाल से जुड़ी नहीं लगी${seen}। कृपया अपने जानवरों या आज जो काम आपने उनके साथ किया उसकी फोटो भेजें।`;
+  }
+  if (lang === "bn") {
+    return `ভাই, এই ছবিটি গরু বা ঘোড়ার পরিচর্যার সাথে সম্পর্কিত মনে হচ্ছে না${seen}। অনুগ্রহ করে আপনার পশু বা আজ আপনি যে কাজ করেছেন তার ছবি পাঠান।`;
+  }
+  return `Bhai, this photo doesn't look related to cattle or horse care${seen}. Please send a photo of your animals or the task you did with them today.`;
+}
+
+function irrelevantNextStep(lang: string): string {
+  if (lang === "hi") return "जानवरों या उनकी देखभाल की एक स्पष्ट फोटो भेजें।";
+  if (lang === "bn") return "পশু বা তাদের পরিচর্যার একটি স্পষ্ট ছবি পাঠান।";
+  return "Share a clear photo of the animals or the care task you performed.";
 }
