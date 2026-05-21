@@ -17,7 +17,7 @@ import {
 
 export const runtime = "nodejs";
 export const preferredRegion = "bom1";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 // ---------------------------------------------------------------------------
 // i18n
@@ -69,6 +69,21 @@ const I18N: Record<string, Record<string, string>> = {
   course_progress:{ en: "Your Course Progress",      hi: "आपकी कोर्स प्रगति", bn: "আপনার কোর্স অগ্রগতি" },
   recent_activity:{ en: "Recent Activity",            hi: "हाल की गतिविधि",   bn: "সাম্প্রতিক কার্যকলাপ" },
   mark_complete:  { en: "Mark complete",              hi: "पूर्ण चिह्नित करें", bn: "সম্পন্ন চিহ্নিত করুন" },
+  voice_not_supported: {
+    en: "Voice notes aren't supported in Field Report mode. Please send a text description or a photo of the animal or task.",
+    hi: "फील्ड रिपोर्ट मोड में वॉइस नोट अभी सपोर्ट नहीं है। कृपया टेक्स्ट विवरण या जानवर/काम की फोटो भेजें।",
+    bn: "ফিল্ড রিপোর্ট মোডে ভয়েস নোট সাপোর্ট নেই। অনুগ্রহ করে টেক্সট বিবরণ বা পশু/কাজের ছবি পাঠান।",
+  },
+  photo_load_failed: {
+    en: "I couldn't load your photo. Please try sending it again.",
+    hi: "मैं आपकी फोटो लोड नहीं कर सका। कृपया दोबारा भेजें।",
+    bn: "আমি আপনার ছবি লোড করতে পারিনি। অনুগ্রহ করে আবার পাঠান।",
+  },
+  apply_need_input: {
+    en: "Please send a text description or a photo of your field work.",
+    hi: "कृपया अपने काम का विवरण या फोटो भेजें।",
+    bn: "অনুগ্রহ করে আপনার কাজের বিবরণ বা ছবি পাঠান।",
+  },
 };
 
 function t(key: string, lang: Lang = "en"): string {
@@ -230,7 +245,20 @@ async function handleMessage(message: TelegramMessage, acharyaId: string) {
   }
 
   // Commands
-  if (text === "/start" || isCmd(text, "home")) { await sendHome(chatId, account, acharyaId); return; }
+  if (text === "/start" || isCmd(text, "home")) {
+    if (isQuizState(account.state) || account.mode === "apply") {
+      const cleanedState = clearTransientState(account.state);
+      await dbGunakul.from("telegram_accounts").update({
+        mode: "ask",
+        state: cleanedState,
+        updated_at: new Date().toISOString(),
+      }).eq("id", account.id);
+      account.mode = "ask";
+      account.state = cleanedState;
+    }
+    await sendHome(chatId, account, acharyaId);
+    return;
+  }
   if (text === "/logout" || isCmd(text, "logout")) {
     await dbGunakul.from("telegram_accounts").update({ user_id: null, phone: null, updated_at: new Date().toISOString() }).eq("id", account.id);
     await sendMessage(chatId, t("logged_out", account.preferred_lang), { remove_keyboard: true });
@@ -517,8 +545,8 @@ async function sendLanguagePicker(chatId: number) {
   await sendMessage(chatId, "Choose your language / भाषा चुनें / ভাষা বেছে নিন", {
     inline_keyboard: [[
       { text: "English", callback_data: "confirm_lang:en" },
-      { text: "Hindi", callback_data: "confirm_lang:hi" },
-      { text: "Bengali", callback_data: "confirm_lang:bn" },
+      { text: "हिंदी", callback_data: "confirm_lang:hi" },
+      { text: "বাংলা", callback_data: "confirm_lang:bn" },
     ]],
   });
 }
@@ -750,9 +778,24 @@ async function handleApplyMessage(chatId: number, account: TelegramAccount, mess
   if (!account.user_id) return;
   const text = (message.text || message.caption || "").trim();
   const photo = message.photo?.slice().sort((a, b) => (b.file_size || 0) - (a.file_size || 0))[0];
-  const fileId = photo?.file_id || message.voice?.file_id;
-  const image = fileId ? await getFileAsDataUrl(fileId).catch(() => null) : null;
-  if (!text && !image) return;
+
+  if (!text && !photo && message.voice) {
+    await sendMessage(chatId, t("voice_not_supported", account.preferred_lang), persistentMainMenu(account.preferred_lang));
+    return;
+  }
+  if (!text && !photo) {
+    await sendMessage(chatId, t("apply_need_input", account.preferred_lang), persistentMainMenu(account.preferred_lang));
+    return;
+  }
+
+  let image: string | null = null;
+  if (photo) {
+    image = await getFileAsDataUrl(photo.file_id).catch(() => null);
+    if (!image) {
+      await sendMessage(chatId, t("photo_load_failed", account.preferred_lang), persistentMainMenu(account.preferred_lang));
+      return;
+    }
+  }
 
   await sendMessage(chatId, t("reviewing", account.preferred_lang));
   const evaluation = await evaluateApply({
@@ -973,6 +1016,10 @@ async function sendVideos(chatId: number, lang: Lang) {
 // ---------------------------------------------------------------------------
 function isLang(value: unknown): value is Lang {
   return value === "bn" || value === "hi" || value === "en";
+}
+
+function clearTransientState(state: Record<string, unknown>): Record<string, unknown> {
+  return state.lang_selected ? { lang_selected: true } : {};
 }
 
 function isQuizState(value: unknown): value is QuizState {

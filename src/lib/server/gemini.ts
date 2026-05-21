@@ -225,7 +225,9 @@ export async function evaluateApply(opts: {
 Learner's text report:
 ${opts.text || "(no text provided)"}
 
-${opts.hasPhoto ? `Photo description (from a separate vision check): ${imageDescription || "unavailable"}\nThe photo has been confirmed to show livestock-related field work.` : "No photo attached."}
+${opts.hasPhoto && opts.image
+  ? `Photo description (from a separate vision check): ${imageDescription || "unavailable"}\nThe photo has been confirmed to show livestock-related field work.`
+  : "No photo attached."}
 
 Give a short, practical evaluation. Score from 0 to 10 based on the field work described. Be encouraging but specific. Respond ONLY in valid JSON:
 {"score":7,"feedback":"short practical feedback in plain text","nextStep":"one concrete next step"}
